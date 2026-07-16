@@ -1,4 +1,3 @@
-```yaml
 name: Automated Build
 
 on:
@@ -68,4 +67,4 @@ jobs:
           body: |
             Automatically built by GitHub Actions.
           files: ${{ steps.zip.outputs.path }}
-```
+
