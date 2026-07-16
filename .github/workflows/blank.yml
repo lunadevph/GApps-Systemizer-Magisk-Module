@@ -1,0 +1,71 @@
+```yaml
+name: Automated Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install 7-Zip
+        shell: powershell
+        run: |
+          choco install 7zip -y
+
+      - name: Verify installation
+        shell: powershell
+        run: |
+          & "C:\Program Files\7-Zip\7z.exe" | Select-Object -First 5
+
+      - name: Generate timestamp
+        id: timestamp
+        shell: powershell
+        run: |
+          "value=$(Get-Date -Format 'yyyyMMdd-HHmmss')" >> $env:GITHUB_OUTPUT
+
+      - name: Build module
+        working-directory: BuildScripts
+        shell: cmd
+        run: |
+          build.bat "C:\Program Files\7-Zip\7z.exe"
+
+      - name: Find ZIP
+        id: zip
+        shell: powershell
+        run: |
+          $file = Get-ChildItem BuildScripts -Filter *.zip |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+
+          if (-not $file) {
+            throw "No ZIP produced."
+          }
+
+          "path=$($file.FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($file.Name)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: automated-build-${{ steps.timestamp.outputs.value }}
+          path: ${{ steps.zip.outputs.path }}
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: automated-build-${{ steps.timestamp.outputs.value }}
+          name: Automated Build ${{ steps.timestamp.outputs.value }}
+          body: |
+            Automatically built by GitHub Actions.
+          files: ${{ steps.zip.outputs.path }}
+```
