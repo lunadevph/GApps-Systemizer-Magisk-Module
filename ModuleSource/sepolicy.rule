@@ -1,0 +1,6 @@
+# GApps SELinux policy
+allow untrusted_app gmscore_app unix_stream_socket connectto
+allow gmscore_app gmscore_app unix_stream_socket create
+allow gmscore_app gmscore_app unix_stream_socket connect
+allow gmscore_app gmscore_app tcp_socket create
+allow gmscore_app gmscore_app tcp_socket connect

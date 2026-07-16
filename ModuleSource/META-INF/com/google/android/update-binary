@@ -1,0 +1,61 @@
+#!/sbin/sh
+
+#################
+# Initialization
+#################
+
+umask 022
+
+# echo before loading util_functions
+ui_print() { echo "$1"; }
+
+require_new_ksu() {
+  ui_print "*******************************"
+  ui_print " Please install KernelSU v0.6+ "
+  ui_print "*******************************"
+  exit 1
+}
+
+##########################
+# Determine module folder
+##########################
+
+if [ -z $BOOTMODE ]; then
+  BOOTMODE=false
+fi
+
+if [ -z $MODPATH ]; then
+  MODPATH=$NVBASE/modules_update/$MODID
+fi
+
+# Redirect to /dev/null if not in boot mode
+if [ "$BOOTMODE" == false ]; then
+  exec 2>/dev/null
+fi
+
+#######################
+# Load util_functions.sh
+#######################
+
+OUTFD=$2
+ZIPFILE=$3
+
+if [ -f /data/adb/ksu/util_functions.sh ]; then
+  . /data/adb/ksu/util_functions.sh
+  KSU=true
+  KSU_VER=$(cat /data/adb/ksu/ksud)
+  KSU_VER_CODE=$(ksud -V)
+  KSU_KERNEL_VER_CODE=$(uname -r | sed 's/[^0-9]//g')
+elif [ -f /data/adb/ap/util_functions.sh ]; then
+  . /data/adb/ap/util_functions.sh
+  APATCH=true
+  APATCH_VER=$(cat /data/adb/ap/version)
+  APATCH_VER_CODE=$(cat /data/adb/ap/versionCode)
+else
+  . /data/adb/magisk/util_functions.sh
+  [ $? -ne 0 ] && exit 1
+  MAGISK=true
+fi
+
+install_module
+exit 0
