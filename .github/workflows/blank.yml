@@ -1,24 +1,51 @@
+
 name: Automated Build
 
 on:
   workflow_dispatch:
+
   push:
     branches:
       - main
+    paths-ignore:
+      - "**/*.md"
+      - ".gitignore"
 
 permissions:
   contents: write
 
+concurrency:
+  group: automated-build-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
-    name: Automated Build
+    name: Build and Release
     runs-on: windows-latest
 
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-      - name: Download 7-Zip
+      - name: Check required files
+        shell: powershell
+        run: |
+          $requiredFiles = @(
+            "module.prop",
+            "BuildScripts\build.bat"
+          )
+
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path $file)) {
+              throw "Required file not found: $file"
+            }
+          }
+
+          Write-Host "Repository structure verified."
+
+      - name: Download 7-Zip command-line tool
         shell: powershell
         run: |
           $url = "https://www.7-zip.org/a/7zr.exe"
@@ -30,66 +57,138 @@ jobs:
             -UseBasicParsing
 
           if (-not (Test-Path $destination)) {
-            throw "7zr.exe could not be downloaded."
+            throw "Failed to download 7zr.exe."
           }
 
-          Write-Host "Downloaded 7-Zip to $destination"
+          Write-Host "7-Zip downloaded to: $destination"
 
-      - name: Generate release timestamp
+      - name: Read module information
+        id: module
+        shell: powershell
+        run: |
+          $properties = @{}
+
+          Get-Content "module.prop" | ForEach-Object {
+            if ($_ -match '^\s*([^#=\s]+)\s*=\s*(.*)\s*$') {
+              $properties[$matches[1]] = $matches[2].Trim()
+            }
+          }
+
+          $moduleId = $properties["id"]
+          $moduleVersion = $properties["version"]
+          $moduleName = $properties["name"]
+
+          if ([string]::IsNullOrWhiteSpace($moduleId)) {
+            throw "The id field is missing from module.prop."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($moduleVersion)) {
+            throw "The version field is missing from module.prop."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($moduleName)) {
+            $moduleName = $moduleId
+          }
+
+          "id=$moduleId" >> $env:GITHUB_OUTPUT
+          "version=$moduleVersion" >> $env:GITHUB_OUTPUT
+          "name=$moduleName" >> $env:GITHUB_OUTPUT
+
+          Write-Host "Module ID: $moduleId"
+          Write-Host "Module name: $moduleName"
+          Write-Host "Module version: $moduleVersion"
+
+      - name: Generate build timestamp
         id: timestamp
         shell: powershell
         run: |
-          $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-          "value=$timestamp" >> $env:GITHUB_OUTPUT
+          $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
+          $displayTimestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss 'UTC'")
 
-      - name: Run build script
+          "value=$timestamp" >> $env:GITHUB_OUTPUT
+          "display=$displayTimestamp" >> $env:GITHUB_OUTPUT
+
+      - name: Build module
         shell: cmd
         run: |
-          call BuildScripts\build.bat "%RUNNER_TEMP%\7zr.exe"
+          cd /d "%GITHUB_WORKSPACE%"
+          call BuildScripts\build.bat %RUNNER_TEMP%\7zr.exe
+
+          if errorlevel 1 (
+            echo Build failed with exit code %ERRORLEVEL%.
+            exit /b %ERRORLEVEL%
+          )
 
       - name: Find generated ZIP
-        id: zip
+        id: package
         shell: powershell
         run: |
-          $file = Get-ChildItem `
+          $zip = Get-ChildItem `
             -Path $env:GITHUB_WORKSPACE `
             -Filter "*.zip" `
-            -File |
+            -File `
+            -Recurse |
+            Where-Object {
+              $_.FullName -notmatch '\\.git\\' -and
+              $_.FullName -notmatch '\\release-files\\'
+            } |
             Sort-Object LastWriteTimeUtc -Descending |
             Select-Object -First 1
 
-          if (-not $file) {
-            throw "No ZIP file was generated."
+          if (-not $zip) {
+            throw "build.bat completed, but no ZIP file was found."
           }
 
-          Write-Host "Generated ZIP: $($file.FullName)"
+          $releaseDirectory = Join-Path $env:GITHUB_WORKSPACE "release-files"
+          New-Item `
+            -ItemType Directory `
+            -Path $releaseDirectory `
+            -Force | Out-Null
 
-          "path=$($file.FullName)" >> $env:GITHUB_OUTPUT
-          "name=$($file.Name)" >> $env:GITHUB_OUTPUT
+          $releasePath = Join-Path $releaseDirectory $zip.Name
+          Copy-Item $zip.FullName $releasePath -Force
+
+          "path=$releasePath" >> $env:GITHUB_OUTPUT
+          "name=$($zip.Name)" >> $env:GITHUB_OUTPUT
+
+          Write-Host "Generated package: $($zip.FullName)"
+          Write-Host "Release package: $releasePath"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: automated-build-${{ steps.timestamp.outputs.value }}
-          path: ${{ steps.zip.outputs.path }}
+          name: ${{ steps.module.outputs.id }}-${{ steps.timestamp.outputs.value }}
+          path: ${{ steps.package.outputs.path }}
           if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
 
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+      - name: Create timestamped GitHub release
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: automated-build-${{ steps.timestamp.outputs.value }}
           name: Automated Build ${{ steps.timestamp.outputs.value }}
           body: |
             ## Automated Build
 
-            Automatically generated by GitHub Actions.
+            This release was generated automatically by GitHub Actions.
 
-            **File:** `${{ steps.zip.outputs.name }}`
-            **Commit:** `${{ github.sha }}`
+            **Module:** ${{ steps.module.outputs.name }}
+            **Version:** `${{ steps.module.outputs.version }}`
+            **Package:** `${{ steps.package.outputs.name }}`
             **Branch:** `${{ github.ref_name }}`
-            **Build timestamp:** `${{ steps.timestamp.outputs.value }}`
-          files: ${{ steps.zip.outputs.path }}
+            **Commit:** `${{ github.sha }}`
+            **Build time:** `${{ steps.timestamp.outputs.display }}`
+
+            ### Installation
+
+            Download the ZIP file below and install it through Magisk, KernelSU, or KernelSU Next.
+
+            KernelSU and KernelSU Next users must install **Meya OverlayFS** first.
+          files: ${{ steps.package.outputs.path }}
           generate_release_notes: false
+          draft: false
           prerelease: false
           make_latest: true
+          fail_on_unmatched_files: true
 
